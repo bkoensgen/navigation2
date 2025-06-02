@@ -311,6 +311,56 @@ TEST(DockingServerTests, testDockBackward)
   node.reset();
 }
 
+TEST(DockingServerTests, ExceptionHandlingDuringDocking)
+{
+  auto node = std::make_shared<DockingServerShim>();
+  auto node_thread = nav2_util::NodeThread(node);
+  auto client_node = std::make_shared<rclcpp::Node>("test_client");
+
+  // Configure docking server
+  node->declare_parameter("docks", std::vector<std::string>{"test_dock"});
+  node->declare_parameter("test_dock.type", "test_plugin");
+  node->declare_parameter("test_dock.pose", std::vector<double>{0.0, 0.0, 0.0});
+  node->declare_parameter("dock_plugins", std::vector<std::string>{"test_plugin"});
+  node->declare_parameter("test_plugin.plugin", "opennav_docking::TestFailureDock");
+  node->declare_parameter("exception_to_throw", "");
+  node->declare_parameter("dock_action_called", false);
+
+  node->on_configure(rclcpp_lifecycle::State());
+  node->on_activate(rclcpp_lifecycle::State());
+
+  // Test multiple exception scenarios to ensure coverage
+  std::vector<std::string> exceptions = {"FailedToDetectDock", "FailedToControl"};
+
+  for (const auto & exception_type : exceptions) {
+    node->set_parameter(rclcpp::Parameter("exception_to_throw", exception_type));
+    node->set_parameter(rclcpp::Parameter("dock_action_called", false));
+
+    auto client = rclcpp_action::create_client<DockRobot>(client_node, "dock_robot");
+    ASSERT_TRUE(client->wait_for_action_server(2s));
+
+    auto goal = DockRobot::Goal();
+    goal.dock_id = "test_dock";
+    goal.navigate_to_staging_pose = false;
+
+    auto future_goal = client->async_send_goal(goal);
+    rclcpp::spin_until_future_complete(client_node, future_goal, 2s);
+
+    auto goal_handle = future_goal.get();
+    ASSERT_TRUE(goal_handle);
+
+    auto future_result = client->async_get_result(goal_handle);
+    auto status = rclcpp::spin_until_future_complete(client_node, future_result, 5s);
+    ASSERT_EQ(status, rclcpp::FutureReturnCode::SUCCESS);
+
+    auto result = future_result.get();
+    EXPECT_EQ(result.code, rclcpp_action::ResultCode::ABORTED);
+  }
+
+  node->on_deactivate(rclcpp_lifecycle::State());
+  node->on_cleanup(rclcpp_lifecycle::State());
+}
+
 }  // namespace opennav_docking
 
 int main(int argc, char **argv)
